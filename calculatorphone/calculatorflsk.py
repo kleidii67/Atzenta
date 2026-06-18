@@ -1,28 +1,30 @@
 from flask import Flask, request, redirect, url_for, session, abort
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+from cryptography.fernet import Fernet
 import sqlite3
 import os
 import html
 import uuid
+import json
 import hashlib
 from datetime import datetime
 
 app = Flask(__name__)
 
-# --- Διαδρομές προς τις βάσεις & τον φάκελο εικόνων ---
+# --- Paths to the databases & the images folder ---
 HERE = os.path.dirname(os.path.abspath(__file__))
-NUMBERS_DB = os.path.join(HERE, "combos.db")   # οι μυστικοί αριθμοί
-VAULT_DB = os.path.join(HERE, "vault.db")      # χρήστες + προϊόντα
-UPLOAD_DIR = os.path.join(HERE, "static", "uploads")  # εικόνες προϊόντων
+NUMBERS_DB = os.path.join(HERE, "combos.db")   # the secret numbers
+VAULT_DB = os.path.join(HERE, "vault.db")      # users + products
+UPLOAD_DIR = os.path.join(HERE, "static", "uploads")  # product images
 
-# Εικόνες: μόνο αυτές οι καταλήξεις επιτρέπονται, μέγιστο μέγεθος 5 MB.
+# Images: only these extensions are allowed, max size 5 MB.
 ALLOWED_IMG = {"png", "jpg", "jpeg", "gif", "webp"}
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
-# --- Μυστικό κλειδί για τα sessions (το "βραχιολάκι") ---
-# Φορτώνεται από το αρχείο secret.key. Αν δεν υπάρχει, φτιάχνεται τυχαίο.
-# Κρατιέται ΕΚΤΟΣ git (δες .gitignore) ώστε να μένει μυστικό και δύσκολο να σπάσει.
+# --- Secret key for the sessions (the "wristband") ---
+# Loaded from secret.key. If it doesn't exist, a random one is created.
+# Kept OUT of git (see .gitignore) so it stays secret and hard to crack.
 KEY_FILE = os.path.join(HERE, "secret.key")
 if os.path.exists(KEY_FILE):
     with open(KEY_FILE, "rb") as f:
@@ -32,10 +34,41 @@ else:
     with open(KEY_FILE, "wb") as f:
         f.write(app.secret_key)
 
+# --- ENCRYPTION key for orders (Fernet) ---
+# Used to encrypt/decrypt orders.
+# Kept OUT of git (.gitignore). If lost, old orders can never be read again.
+ORDER_KEY_FILE = os.path.join(HERE, "order.key")
+if os.path.exists(ORDER_KEY_FILE):
+    with open(ORDER_KEY_FILE, "rb") as f:
+        ORDER_KEY = f.read()
+else:
+    ORDER_KEY = Fernet.generate_key()
+    with open(ORDER_KEY_FILE, "wb") as f:
+        f.write(ORDER_KEY)
+fernet = Fernet(ORDER_KEY)
+
+
+def ensure_schema():
+    """Make sure the orders table exists (without touching the other data)."""
+    conn = sqlite3.connect(VAULT_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            data_enc TEXT,
+            created_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+ensure_schema()
+
 
 # ======================================================================
-#  ΕΜΦΑΝΙΣΗ — design system ("Analog Control Room")
-#  Ένα κοινό <head> (fonts + CSS) και ένα page() wrapper για ΟΛΕΣ τις σελίδες.
+#  LOOK & FEEL — design system ("Analog Control Room")
+#  One shared <head> (fonts + CSS) and one page() wrapper for ALL pages.
 # ======================================================================
 
 GOOGLE_FONTS = """
@@ -44,7 +77,7 @@ GOOGLE_FONTS = """
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,900;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 """
 
-# ΣΗΜΑΝΤΙΚΟ: το STYLES ΔΕΝ είναι f-string (το CSS έχει { } που θα μπερδεύονταν).
+# IMPORTANT: STYLES is NOT an f-string (CSS has { } that would clash).
 STYLES = """
 <style>
   :root{
@@ -74,7 +107,7 @@ STYLES = """
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
-  /* --- Τυπογραφία / helpers --- */
+  /* --- Typography / helpers --- */
   h1,h2,h3{ font-family:'Fraunces',Georgia,serif; font-weight:600; line-height:1.04; letter-spacing:-.01em; }
   .mono{ font-family:'Space Mono',ui-monospace,monospace; }
   .eyebrow{
@@ -87,7 +120,7 @@ STYLES = """
   .wrap{ max-width:1000px; margin:0 auto; }
   .wrap--narrow{ max-width:760px; }
 
-  /* --- Layout κεντραρισμένων σελίδων --- */
+  /* --- Layout for centered pages --- */
   .stage{ min-height:calc(100vh - 90px); display:flex; flex-direction:column;
           align-items:center; justify-content:center; gap:1.5rem; }
 
@@ -241,6 +274,45 @@ STYLES = """
              text-transform:uppercase; color:var(--paper-dim); text-decoration:none; }
   .backlink:hover{ color:var(--amber); }
 
+  /* --- Cart / Orders --- */
+  .navbtns{ display:flex; gap:.6rem; flex-wrap:wrap; }
+  .cart-count{ display:inline-flex; align-items:center; justify-content:center;
+    min-width:1.4em; height:1.4em; padding:0 .35em; margin-left:.45em; border-radius:999px;
+    background:var(--ink); color:var(--amber); font-size:.72em; font-weight:700; }
+  .cart-row{ display:flex; align-items:center; gap:1rem; padding:1rem 0;
+    border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .cart-row:last-child{ border-bottom:none; }
+  .cart-row form{ margin:0; }
+  .cart-thumb{ width:64px; height:64px; object-fit:cover; border-radius:10px; background:#241d2e; }
+  .cart-info{ flex:1; min-width:150px; }
+  .stepper{ display:flex; align-items:center; gap:.5rem; }
+  .step{ font-family:'Space Mono',monospace; font-size:1.1rem; width:34px; height:34px;
+    border-radius:9px; border:1px solid var(--line-strong); background:rgba(243,235,221,.04);
+    color:var(--paper); cursor:pointer; transition:border-color .2s,color .2s; }
+  .step:hover{ border-color:var(--amber); color:var(--amber); }
+  .qty{ min-width:1.6em; text-align:center; font-weight:700; }
+  .cart-foot{ display:flex; align-items:center; justify-content:space-between; gap:1rem;
+    margin-top:1.5rem; flex-wrap:wrap; }
+  .grand{ font-family:'Fraunces',serif; font-size:1.5rem; }
+  .grand b{ color:var(--amber); }
+  .order-list{ list-style:none; display:grid; gap:.4rem; }
+  .order-list li{ color:var(--paper-dim); padding-left:1.2em; position:relative; }
+  .order-list li::before{ content:"▪"; color:var(--amber); position:absolute; left:0; }
+  .checkout-grid{ display:grid; gap:1.4rem; align-items:start; }
+  @media(min-width:760px){ .checkout-grid{ grid-template-columns:1.15fr 1fr; } }
+  .ship-form{ display:grid; gap:.8rem; }
+
+  /* --- Dashboard stats + search --- */
+  .stats{ display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); margin-bottom:1.8rem; }
+  .stat{ background:linear-gradient(180deg,var(--panel),var(--ink-2)); border:1px solid var(--line);
+    border-radius:14px; padding:1.2rem 1.3rem; box-shadow:var(--shadow); }
+  .stat__num{ font-family:'Fraunces',serif; font-size:2rem; font-weight:900; line-height:1; }
+  .stat__label{ font-family:'Space Mono',monospace; font-size:.64rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--paper-dim); margin-top:.5rem; }
+  .stat--accent .stat__num{ color:var(--amber); }
+  .searchbar{ display:flex; gap:.6rem; margin-bottom:1.6rem; flex-wrap:wrap; }
+  .searchbar input{ flex:1; min-width:180px; }
+
   /* --- Page-load reveal (staggered) --- */
   @keyframes rise{ from{ opacity:0; transform:translateY(14px); } to{ opacity:1; transform:none; } }
   .reveal{ animation:rise .6s cubic-bezier(.2,.7,.2,1) both; }
@@ -258,9 +330,9 @@ STYLES = """
 
 
 def page(title, inner, body_class=""):
-    """Τυλίγει το περιεχόμενο μιας σελίδας με το κοινό <head> + design."""
+    """Wrap a page's content with the shared <head> + design."""
     return f"""<!doctype html>
-<html lang="el">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -276,15 +348,15 @@ def page(title, inner, body_class=""):
 
 
 # ======================================================================
-#  ΒΟΗΘΗΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ
+#  HELPER FUNCTIONS
 # ======================================================================
 
 def secret_number_role(raw_number):
     """
-    Τι ρόλο έχει ο αριθμός που γράφτηκε:
-      "admin"  -> ο αριθμός που ΑΝΟΙΓΕΙ ΤΗΝ ΠΟΡΤΑ (πας στη σελίδα κωδικού)
-      "decoy"  -> ένας από τους υπόλοιπους μυστικούς (δόλωμα, πάει πίσω)
-      None     -> δεν είναι καθόλου μυστικός αριθμός
+    What role the typed number has:
+      "admin"  -> the number that OPENS THE DOOR (goes to the code page)
+      "decoy"  -> one of the other secret numbers (decoy, sends you back)
+      None     -> not a secret number at all
     """
     h = hashlib.sha256(raw_number.strip().encode("utf-8")).hexdigest()
     conn = sqlite3.connect(NUMBERS_DB)
@@ -299,9 +371,9 @@ def secret_number_role(raw_number):
 
 def lookup_user(entered_code):
     """
-    Ψάχνει ποιος χρήστης έχει αυτόν τον κωδικό.
-    Επιστρέφει (id, name, role) αν βρεθεί, αλλιώς None.
-    (Οι κωδικοί είναι salted hash, οπότε τους ελέγχουμε έναν-έναν.)
+    Finds which user owns this code.
+    Returns (id, name, role) if found, otherwise None.
+    (Codes are salted hashes, so we check them one by one.)
     """
     conn = sqlite3.connect(VAULT_DB)
     rows = conn.execute("SELECT id, name, code_hash, role FROM users").fetchall()
@@ -313,64 +385,73 @@ def lookup_user(entered_code):
 
 
 def require_role(*allowed):
-    """Αν ο τρέχων ρόλος δεν είναι μέσα στους επιτρεπόμενους -> 404 (κρυφό)."""
+    """If the current role is not among the allowed ones -> 404 (stealthy)."""
     if session.get("role") not in allowed:
         abort(404)
 
 
 def allowed_image(filename):
-    """True αν το αρχείο έχει επιτρεπτή κατάληξη εικόνας."""
+    """True if the file has an allowed image extension."""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_IMG
 
 
 def count_admins():
-    """Πόσοι admin υπάρχουν (για να μην σβήσουμε τον τελευταίο)."""
+    """How many admins exist (so we don't delete the last one)."""
     conn = sqlite3.connect(VAULT_DB)
     n = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
     conn.close()
     return n
 
 
+def require_login():
+    """Allows ANY logged-in user (admin/manager/simple); otherwise 404."""
+    require_role("admin", "manager", "simple")
+
+
+def encrypt_order(data):
+    """Takes an order dict -> encrypted text (Fernet)."""
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return fernet.encrypt(raw).decode("utf-8")
+
+
+def decrypt_order(token):
+    """Takes encrypted text -> order dict."""
+    raw = fernet.decrypt(token.encode("utf-8"))
+    return json.loads(raw.decode("utf-8"))
+
+
+def cart_summary():
+    """
+    Reads the cart from the session AND the current prices from the database
+    (we never trust prices coming from the browser).
+    Returns: (items, total, count)
+    """
+    cart = session.get("cart", {})
+    items, total, count = [], 0.0, 0
+    if cart:
+        conn = sqlite3.connect(VAULT_DB)
+        for pid_str, qty in cart.items():
+            row = conn.execute(
+                "SELECT id, name, price, image_file FROM products WHERE id=?",
+                (int(pid_str),)
+            ).fetchone()
+            if row:  # if the manager deleted the product, just skip it
+                line = row[2] * qty
+                total += line
+                count += qty
+                items.append({"id": row[0], "name": row[1], "price": row[2],
+                              "image": row[3], "qty": qty, "line": line})
+        conn.close()
+    return items, total, count
+
+
 # ======================================================================
-#  ΑΡΙΘΜΟΜΗΧΑΝΗ + ΚΡΥΦΗ ΠΟΡΤΑ
+#  CALCULATOR + HIDDEN DOOR
 # ======================================================================
 
-@app.route("/", methods=["GET", "POST"])
-def calculator():
-    result_text = ""
-    if request.method == "POST":
-        num1_raw = request.form["num1"]
-        num2_raw = request.form["num2"]
-        op = request.form["op"]
-
-        # --- ΜΥΣΤΙΚΗ ΠΟΡΤΑ ---
-        # Αν πατήθηκε το "-", κοίτα τι ρόλο έχει ο πρώτος αριθμός:
-        #   "admin" -> ο αριθμός που ανοίγει την πόρτα: πήγαινε στη σελίδα κωδικού
-        #   "decoy" -> δόλωμα: πέτα τον πίσω στην αρχική (σαν να μην έγινε τίποτα)
-        if op == "-":
-            role = secret_number_role(num1_raw)
-            if role == "admin":
-                return redirect(url_for("secret"))
-            elif role == "decoy":
-                return redirect(url_for("calculator"))
-
-        num1 = float(num1_raw)
-        num2 = float(num2_raw)
-
-        if op == "+":
-            answer = num1 + num2
-        elif op == "-":
-            answer = num1 - num2
-        elif op == "*":
-            answer = num1 * num2
-        elif op == "/":
-            answer = num1 / num2
-        else:
-            answer = "Άγνωστη πράξη"
-
-        result_text = str(answer)
-
-    inner = f"""
+def _calculator_inner(result_text):
+    """Builds the calculator HTML (result_text goes into the display)."""
+    return f"""
     <div class="stage">
         <form method="post" class="device reveal">
             <div class="device__top">
@@ -379,8 +460,8 @@ def calculator():
             </div>
             <div class="display">{html.escape(result_text) or '0'}</div>
             <div class="inputs">
-                <input name="num1" inputmode="decimal" placeholder="Πρώτος αριθμός" required autofocus>
-                <input name="num2" inputmode="decimal" placeholder="Δεύτερος αριθμός" required>
+                <input name="num1" inputmode="decimal" placeholder="First number" required autofocus>
+                <input name="num2" inputmode="decimal" placeholder="Second number" required>
             </div>
             <div class="keys">
                 <button class="key" type="submit" name="op" value="+">+</button>
@@ -391,7 +472,50 @@ def calculator():
         </form>
     </div>
     """
-    return page("Calculator", inner)
+
+
+@app.route("/", methods=["GET", "POST"])
+def calculator():
+    result_text = ""
+    if request.method == "POST":
+        num1_raw = request.form["num1"]
+        num2_raw = request.form["num2"]
+        op = request.form["op"]
+
+        # --- HIDDEN DOOR ---
+        # If "-" was pressed, check the role of the first number:
+        #   "admin" -> the number that opens the door: go to the code page
+        #   "decoy" -> decoy: send them back to the home page (as if nothing happened)
+        if op == "-":
+            role = secret_number_role(num1_raw)
+            if role == "admin":
+                return redirect(url_for("secret"))
+            elif role == "decoy":
+                return redirect(url_for("calculator"))
+
+        # Decimals with a comma (3,5) or a dot (3.5) both work.
+        try:
+            num1 = float(num1_raw.replace(",", "."))
+            num2 = float(num2_raw.replace(",", "."))
+        except ValueError:
+            # Bad input (empty/text) -> don't crash, show a message.
+            result_text = "Numbers only"
+            return page("Calculator", _calculator_inner(result_text))
+
+        if op == "+":
+            answer = num1 + num2
+        elif op == "-":
+            answer = num1 - num2
+        elif op == "*":
+            answer = num1 * num2
+        elif op == "/":
+            answer = num1 / num2 if num2 != 0 else "Can't divide by 0"
+        else:
+            answer = "Unknown operation"
+
+        result_text = str(answer)
+
+    return page("Calculator", _calculator_inner(result_text))
 
 
 @app.route("/secret", methods=["GET", "POST"])
@@ -402,8 +526,8 @@ def secret():
         user = lookup_user(entered)
         if user:
             uid, name, role = user
-            # Σωστός κωδικός -> δώσε "βραχιολάκι" (session) και πήγαινε
-            # στη σελίδα που ταιριάζει στον ρόλο του.
+            # Correct code -> give the "wristband" (session) and go
+            # to the page that matches their role.
             session["user_id"] = uid
             session["name"] = name
             session["role"] = role
@@ -413,50 +537,62 @@ def secret():
                 return redirect(url_for("manager"))
             else:
                 return redirect(url_for("user_page"))
-        message = '<div class="notice notice--bad">Λάθος κωδικός!</div>'
+        message = '<div class="notice notice--bad">Wrong code!</div>'
 
     inner = f"""
     <div class="stage">
         <div class="panel brackets reveal" style="width:100%;max-width:410px">
             <div class="panel__body" style="text-align:center">
                 <div class="lock">🔒</div>
-                <div class="eyebrow eyebrow--c" style="margin:.9rem 0 .9rem">Restricted · Είσοδος</div>
-                <h1 style="font-size:2rem;margin-bottom:.4rem">Μυστική Σελίδα</h1>
-                <p style="color:var(--paper-dim);font-size:.92rem;margin-bottom:1.4rem">Δώσε τον προσωπικό σου κωδικό.</p>
+                <div class="eyebrow eyebrow--c" style="margin:.9rem 0 .9rem">Restricted · Access</div>
+                <h1 style="font-size:2rem;margin-bottom:.4rem">Secret Page</h1>
+                <p style="color:var(--paper-dim);font-size:.92rem;margin-bottom:1.4rem">Enter your personal code.</p>
                 {message}
                 <form method="post">
-                    <input type="password" name="password" placeholder="Κωδικός" required autofocus style="text-align:center;margin-bottom:1rem">
-                    <button type="submit" class="btn btn--accent btn--block">Είσοδος →</button>
+                    <input type="password" name="password" placeholder="Code" required autofocus style="text-align:center;margin-bottom:1rem">
+                    <button type="submit" class="btn btn--accent btn--block">Enter →</button>
                 </form>
             </div>
         </div>
-        <a href="/" class="backlink reveal">← Πίσω</a>
+        <a href="/" class="backlink reveal">← Back</a>
     </div>
     """
-    return page("Είσοδος", inner)
+    return page("Access", inner)
 
 
 # ======================================================================
-#  ADMIN — διαχείριση χρηστών (κωδικών)
+#  ADMIN — user (code) management
 # ======================================================================
 
 def render_admin(message=""):
-    """Φτιάχνει το HTML της admin σελίδας (λίστα χρηστών + φόρμα δημιουργίας)."""
+    """Builds the admin page HTML (dashboard + user list + create form)."""
     conn = sqlite3.connect(VAULT_DB)
     users = conn.execute(
         "SELECT id, name, role, created_at FROM users ORDER BY id"
     ).fetchall()
+    n_products = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+    order_rows = conn.execute("SELECT data_enc FROM orders").fetchall()
     conn.close()
+
+    # --- Dashboard stats ---
+    n_users = len(users)
+    n_orders = len(order_rows)
+    revenue = 0.0
+    for (enc,) in order_rows:
+        try:  # revenue is encrypted -> decrypt it to sum it up
+            revenue += float(decrypt_order(enc).get("total", 0))
+        except Exception:
+            pass
 
     rows = ""
     for uid, name, role, created_at in users:
         if uid == session.get("user_id"):
-            delete_btn = '<span class="mono" style="font-size:.7rem;color:var(--paper-dim)">(εσύ)</span>'
+            delete_btn = '<span class="mono" style="font-size:.7rem;color:var(--paper-dim)">(you)</span>'
         else:
             delete_btn = (
                 f'<form method="post" action="/admin/delete/{uid}" '
-                f"onsubmit=\"return confirm('Σίγουρα διαγραφή;');\">"
-                f'<button class="btn btn--danger" type="submit">Διαγραφή</button></form>'
+                f"onsubmit=\"return confirm('Delete for sure?');\">"
+                f'<button class="btn btn--danger" type="submit">Delete</button></form>'
             )
         rows += f"""
             <tr>
@@ -472,32 +608,39 @@ def render_admin(message=""):
     <div class="wrap wrap--narrow">
         <div class="topbar">
             <div>
-                <div class="eyebrow">Admin · Διαχείριση</div>
-                <h1>Πίνακας ελέγχου</h1>
+                <div class="eyebrow">Admin · Management</div>
+                <h1>Control Panel</h1>
             </div>
-            <a href="/logout" class="btn btn--ghost">Έξοδος</a>
+            <a href="/logout" class="btn btn--ghost">Log out</a>
+        </div>
+
+        <div class="stats">
+            <div class="stat reveal"><div class="stat__num">{n_users}</div><div class="stat__label">Users</div></div>
+            <div class="stat reveal"><div class="stat__num">{n_products}</div><div class="stat__label">Products</div></div>
+            <div class="stat reveal"><div class="stat__num">{n_orders}</div><div class="stat__label">Orders</div></div>
+            <div class="stat reveal stat--accent"><div class="stat__num">{revenue:.2f} €</div><div class="stat__label">Revenue</div></div>
         </div>
 
         <div class="panel reveal" style="margin-bottom:1.6rem">
-            <div class="panel__head">＋ Νέος χρήστης / κωδικός</div>
+            <div class="panel__head">＋ New user / code</div>
             <div class="panel__body">
                 {msg_html}
                 <form method="post" action="/admin/create" class="formline formline--users">
-                    <input name="name" placeholder="Όνομα / ετικέτα" required>
+                    <input name="name" placeholder="Name / label" required>
                     <select name="role">
-                        <option value="manager">manager — ανεβάζει προϊόντα</option>
-                        <option value="simple">simple — βλέπει προϊόντα</option>
+                        <option value="manager">manager — uploads products</option>
+                        <option value="simple">simple — views products</option>
                     </select>
-                    <input name="password" placeholder="Κωδικός (≥6)" required>
-                    <button class="btn btn--accent" type="submit">Δημιουργία</button>
+                    <input name="password" placeholder="Code (≥6)" required>
+                    <button class="btn btn--accent" type="submit">Create</button>
                 </form>
             </div>
         </div>
 
         <div class="panel reveal">
-            <div class="panel__head">👥 Χρήστες με κωδικό</div>
+            <div class="panel__head">👥 Users with a code</div>
             <table class="table">
-                <thead><tr><th>Όνομα</th><th>Ρόλος</th><th>Δημιουργήθηκε</th><th></th></tr></thead>
+                <thead><tr><th>Name</th><th>Role</th><th>Created</th><th></th></tr></thead>
                 <tbody>{rows}</tbody>
             </table>
         </div>
@@ -519,15 +662,15 @@ def admin_create():
     role = request.form.get("role", "")
     password = request.form.get("password", "")
 
-    # --- Έλεγχοι ασφαλείας/ορθότητας ---
+    # --- Safety / validity checks ---
     if role not in ("manager", "simple"):
-        return render_admin("Άκυρος ρόλος.")
+        return render_admin("Invalid role.")
     if not name:
-        return render_admin("Βάλε ένα όνομα/ετικέτα.")
+        return render_admin("Enter a name/label.")
     if len(password) < 6:
-        return render_admin("Ο κωδικός πρέπει να έχει τουλάχιστον 6 χαρακτήρες.")
+        return render_admin("The code must be at least 6 characters.")
     if lookup_user(password) is not None:
-        return render_admin("Αυτός ο κωδικός χρησιμοποιείται ήδη — διάλεξε άλλον.")
+        return render_admin("This code is already in use — choose another.")
 
     conn = sqlite3.connect(VAULT_DB)
     conn.execute(
@@ -545,10 +688,10 @@ def admin_delete(user_id):
     require_role("admin")
     conn = sqlite3.connect(VAULT_DB)
     row = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
-    # Μην αφήσεις να σβηστεί ο τελευταίος admin (αλλιώς κλειδωνόμαστε έξω).
+    # Don't allow deleting the last admin (otherwise we lock ourselves out).
     if row and row[0] == "admin" and count_admins() <= 1:
         conn.close()
-        return render_admin("Δεν μπορείς να σβήσεις τον τελευταίο admin!")
+        return render_admin("You can't delete the last admin!")
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()
     conn.close()
@@ -556,11 +699,11 @@ def admin_delete(user_id):
 
 
 # ======================================================================
-#  MANAGER — διαχείριση προϊόντων
+#  MANAGER — product management
 # ======================================================================
 
 def render_manager(message=""):
-    """HTML της manager σελίδας: φόρμα προσθήκης + τα δικά του προϊόντα."""
+    """HTML of the manager page: add form + their own products."""
     conn = sqlite3.connect(VAULT_DB)
     products = conn.execute(
         "SELECT id, name, price, description, image_file FROM products "
@@ -579,13 +722,13 @@ def render_manager(message=""):
                     <div class="tag">{price:.2f} €</div>
                     <div class="product__desc">{html.escape(description or '')}</div>
                     <form method="post" action="/manager/delete-product/{pid}"
-                          onsubmit="return confirm('Σίγουρα διαγραφή προϊόντος;');">
-                        <button class="btn btn--danger btn--block" type="submit">Διαγραφή</button>
+                          onsubmit="return confirm('Delete this product for sure?');">
+                        <button class="btn btn--danger btn--block" type="submit">Delete</button>
                     </form>
                 </div>
             </div>"""
     products_html = f'<div class="grid">{cards}</div>' if cards else \
-        '<div class="empty">Δεν έχεις ανεβάσει προϊόντα ακόμα.</div>'
+        '<div class="empty">No products uploaded yet.</div>'
 
     msg_html = f'<div class="notice">{html.escape(message)}</div>' if message else ""
 
@@ -593,22 +736,22 @@ def render_manager(message=""):
     <div class="wrap">
         <div class="topbar">
             <div>
-                <div class="eyebrow">Manager · Απόθεμα</div>
-                <h1>Τα προϊόντα μου</h1>
+                <div class="eyebrow">Manager · Inventory</div>
+                <h1>My products</h1>
             </div>
-            <a href="/logout" class="btn btn--ghost">Έξοδος</a>
+            <a href="/logout" class="btn btn--ghost">Log out</a>
         </div>
 
         <div class="panel reveal" style="margin-bottom:1.8rem">
-            <div class="panel__head">＋ Νέο προϊόν</div>
+            <div class="panel__head">＋ New product</div>
             <div class="panel__body">
                 {msg_html}
                 <form method="post" action="/manager/add-product" enctype="multipart/form-data" class="formline formline--products">
-                    <input name="name" placeholder="Όνομα προϊόντος" required>
-                    <input name="price" type="number" step="0.01" min="0" placeholder="Τιμή €" required>
-                    <input name="description" placeholder="Περιγραφή (προαιρετικό)">
+                    <input name="name" placeholder="Product name" required>
+                    <input name="price" type="number" step="0.01" min="0" placeholder="Price €" required>
+                    <input name="description" placeholder="Description (optional)">
                     <input name="image" type="file" accept="image/*" required>
-                    <button class="btn btn--accent" type="submit">Προσθήκη</button>
+                    <button class="btn btn--accent" type="submit">Add</button>
                 </form>
             </div>
         </div>
@@ -633,19 +776,19 @@ def add_product():
     description = request.form.get("description", "").strip()
     image = request.files.get("image")
 
-    # --- Έλεγχοι ---
+    # --- Checks ---
     if not name:
-        return render_manager("Βάλε όνομα προϊόντος.")
+        return render_manager("Enter a product name.")
     try:
         price = float(price_raw)
     except ValueError:
-        return render_manager("Η τιμή πρέπει να είναι αριθμός.")
+        return render_manager("Price must be a number.")
     if image is None or image.filename == "":
-        return render_manager("Διάλεξε μια εικόνα.")
+        return render_manager("Choose an image.")
     if not allowed_image(image.filename):
-        return render_manager("Επιτρέπονται μόνο εικόνες (png, jpg, jpeg, gif, webp).")
+        return render_manager("Only images allowed (png, jpg, jpeg, gif, webp).")
 
-    # Ασφαλές & μοναδικό όνομα αρχείου, ώστε να μην "πατιούνται" εικόνες.
+    # Safe & unique filename, so images don't overwrite each other.
     ext = image.filename.rsplit(".", 1)[1].lower()
     saved_name = f"{uuid.uuid4().hex}.{ext}"
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -670,14 +813,14 @@ def delete_product(pid):
     row = conn.execute(
         "SELECT manager_id, image_file FROM products WHERE id=?", (pid,)
     ).fetchone()
-    # Ένας manager σβήνει ΜΟΝΟ τα δικά του (ο admin σβήνει οποιοδήποτε).
+    # A manager deletes ONLY their own (an admin deletes any).
     if row is None or (session.get("role") != "admin" and row[0] != session.get("user_id")):
         conn.close()
         abort(404)
     conn.execute("DELETE FROM products WHERE id=?", (pid,))
     conn.commit()
     conn.close()
-    # Σβήσε και το αρχείο της εικόνας από τον δίσκο.
+    # Also delete the image file from disk.
     if row[1]:
         try:
             os.remove(os.path.join(UPLOAD_DIR, row[1]))
@@ -687,24 +830,33 @@ def delete_product(pid):
 
 
 # ======================================================================
-#  SIMPLE — προβολή προϊόντων (βιτρίνα)
+#  SIMPLE — product storefront
 # ======================================================================
 
 @app.route("/user")
 def user_page():
-    # Οποιοσδήποτε συνδεδεμένος (admin/manager/simple) μπορεί να δει τη βιτρίνα.
-    require_role("admin", "manager", "simple")
+    # Any logged-in user (admin/manager/simple) can see the storefront.
+    require_login()
+
+    # Search: ?q=... filters by name or description.
+    q = request.args.get("q", "").strip()
+    sql = ("SELECT p.id, p.name, p.price, p.description, p.image_file, u.name "
+           "FROM products p LEFT JOIN users u ON p.manager_id = u.id")
+    params = ()
+    if q:
+        sql += " WHERE p.name LIKE ? OR p.description LIKE ?"
+        params = (f"%{q}%", f"%{q}%")
+    sql += " ORDER BY p.id DESC"
 
     conn = sqlite3.connect(VAULT_DB)
-    products = conn.execute(
-        "SELECT p.name, p.price, p.description, p.image_file, u.name "
-        "FROM products p LEFT JOIN users u ON p.manager_id = u.id "
-        "ORDER BY p.id DESC"
-    ).fetchall()
+    products = conn.execute(sql, params).fetchall()
     conn.close()
 
+    _, _, count = cart_summary()
+    badge = f'<span class="cart-count">{count}</span>' if count else ""
+
     cards = ""
-    for name, price, description, image_file, manager_name in products:
+    for pid, name, price, description, image_file, manager_name in products:
         cards += f"""
             <div class="product reveal">
                 <img class="product__img" src="/static/uploads/{html.escape(image_file or '')}" alt="">
@@ -713,29 +865,281 @@ def user_page():
                     <div class="tag">{price:.2f} €</div>
                     <div class="product__desc">{html.escape(description or '')}</div>
                     <div class="product__meta">— {html.escape(manager_name or '—')}</div>
+                    <form method="post" action="/cart/add/{pid}">
+                        <button class="btn btn--accent btn--block" type="submit">＋ Add to cart</button>
+                    </form>
                 </div>
             </div>"""
-    products_html = f'<div class="grid grid--shop">{cards}</div>' if cards else \
-        '<div class="empty">Δεν υπάρχουν προϊόντα ακόμα.</div>'
+    if cards:
+        products_html = f'<div class="grid grid--shop">{cards}</div>'
+    elif q:
+        products_html = f'<div class="empty">No products found for &laquo;{html.escape(q)}&raquo;. <a href="/user" style="color:var(--amber)">See all</a></div>'
+    else:
+        products_html = '<div class="empty">No products yet.</div>'
+
+    clear = f'<a href="/user" class="btn btn--ghost">✕</a>' if q else ""
 
     inner = f"""
     <div class="wrap">
         <div class="topbar">
             <div>
-                <div class="eyebrow">Κατάλογος · Products</div>
-                <h1>Προϊόντα</h1>
+                <div class="eyebrow">Catalog · Products</div>
+                <h1>Products</h1>
             </div>
-            <a href="/logout" class="btn btn--ghost">Έξοδος</a>
+            <div class="navbtns">
+                <a href="/orders" class="btn btn--ghost">My orders</a>
+                <a href="/cart" class="btn">🛒 Cart {badge}</a>
+                <a href="/logout" class="btn btn--ghost">Log out</a>
+            </div>
         </div>
+        <form method="get" action="/user" class="searchbar">
+            <input name="q" value="{html.escape(q)}" placeholder="Search products...">
+            <button class="btn btn--accent" type="submit">Search</button>
+            {clear}
+        </form>
         {products_html}
     </div>
     """
-    return page("Προϊόντα", inner)
+    return page("Products", inner)
+
+
+# ======================================================================
+#  CART + ORDERS (encrypted)
+# ======================================================================
+
+@app.route("/cart/add/<int:pid>", methods=["POST"])
+def cart_add(pid):
+    require_login()
+    conn = sqlite3.connect(VAULT_DB)
+    exists = conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone()
+    conn.close()
+    if exists:
+        cart = session.get("cart", {})
+        cart[str(pid)] = cart.get(str(pid), 0) + 1
+        session["cart"] = cart            # re-assign -> the session gets saved
+    return redirect(url_for("cart_view"))
+
+
+@app.route("/cart/inc/<int:pid>", methods=["POST"])
+def cart_inc(pid):
+    require_login()
+    cart = session.get("cart", {})
+    if str(pid) in cart:
+        cart[str(pid)] += 1
+        session["cart"] = cart
+    return redirect(url_for("cart_view"))
+
+
+@app.route("/cart/dec/<int:pid>", methods=["POST"])
+def cart_dec(pid):
+    require_login()
+    cart = session.get("cart", {})
+    if str(pid) in cart:
+        cart[str(pid)] -= 1
+        if cart[str(pid)] <= 0:
+            del cart[str(pid)]
+        session["cart"] = cart
+    return redirect(url_for("cart_view"))
+
+
+@app.route("/cart/remove/<int:pid>", methods=["POST"])
+def cart_remove(pid):
+    require_login()
+    cart = session.get("cart", {})
+    cart.pop(str(pid), None)
+    session["cart"] = cart
+    return redirect(url_for("cart_view"))
+
+
+@app.route("/cart")
+def cart_view():
+    require_login()
+    items, total, count = cart_summary()
+
+    rows = ""
+    for it in items:
+        rows += f"""
+            <div class="cart-row">
+                <img class="cart-thumb" src="/static/uploads/{html.escape(it['image'] or '')}" alt="">
+                <div class="cart-info">
+                    <div class="product__name" style="font-size:1.05rem">{html.escape(it['name'])}</div>
+                    <div class="product__meta">{it['price']:.2f} € / ea.</div>
+                </div>
+                <div class="stepper">
+                    <form method="post" action="/cart/dec/{it['id']}"><button class="step" type="submit">−</button></form>
+                    <span class="qty mono">{it['qty']}</span>
+                    <form method="post" action="/cart/inc/{it['id']}"><button class="step" type="submit">+</button></form>
+                </div>
+                <div class="tag" style="min-width:95px;text-align:right">{it['line']:.2f} €</div>
+                <form method="post" action="/cart/remove/{it['id']}"><button class="btn btn--danger" type="submit">✕</button></form>
+            </div>"""
+
+    if items:
+        body = f"""
+        <div class="panel reveal">
+            <div class="panel__body">
+                {rows}
+                <div class="cart-foot">
+                    <a href="/user" class="btn btn--ghost">← Continue shopping</a>
+                    <div class="grand">Total: <b>{total:.2f} €</b></div>
+                    <a href="/checkout" class="btn btn--accent">Checkout →</a>
+                </div>
+            </div>
+        </div>"""
+    else:
+        body = """
+        <div class="empty">Your cart is empty.</div>
+        <div style="margin-top:1.2rem"><a href="/user" class="btn btn--accent">← See the products</a></div>"""
+
+    inner = f"""
+    <div class="wrap wrap--narrow">
+        <div class="topbar">
+            <div>
+                <div class="eyebrow">Shop · Cart</div>
+                <h1>My cart</h1>
+            </div>
+            <a href="/user" class="btn btn--ghost">Back to products</a>
+        </div>
+        {body}
+    </div>
+    """
+    return page("Cart", inner)
+
+
+@app.route("/checkout", methods=["GET", "POST"])
+def checkout():
+    require_login()
+    items, total, count = cart_summary()
+    if not items:
+        return redirect(url_for("cart_view"))
+
+    message = ""
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        address = request.form.get("address", "").strip()
+        phone = request.form.get("phone", "").strip()
+        if not name or not address or not phone:
+            message = "Fill in all the shipping details."
+        else:
+            # Build the order and ENCRYPT it before storing.
+            order = {
+                "items": [{"name": it["name"], "price": it["price"],
+                           "qty": it["qty"], "line": it["line"]} for it in items],
+                "total": round(total, 2),
+                "shipping": {"name": name, "address": address, "phone": phone},
+                "datetime": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+            conn = sqlite3.connect(VAULT_DB)
+            conn.execute(
+                "INSERT INTO orders (user_id, data_enc, created_at) VALUES (?, ?, ?)",
+                (session["user_id"], encrypt_order(order), order["datetime"])
+            )
+            conn.commit()
+            conn.close()
+            session["cart"] = {}   # empty the cart after the purchase
+            return redirect(url_for("orders_view", ok=1))
+
+    summary = ""
+    for it in items:
+        summary += f'<li>{html.escape(it["name"])} × {it["qty"]} — {it["line"]:.2f} €</li>'
+
+    msg_html = f'<div class="notice notice--bad">{html.escape(message)}</div>' if message else ""
+
+    inner = f"""
+    <div class="wrap wrap--narrow">
+        <div class="topbar">
+            <div>
+                <div class="eyebrow">Payment · Checkout</div>
+                <h1>Shipping details</h1>
+            </div>
+            <a href="/cart" class="btn btn--ghost">← Cart</a>
+        </div>
+        <div class="checkout-grid">
+            <div class="panel reveal">
+                <div class="panel__head">🚚 Where to ship</div>
+                <div class="panel__body">
+                    {msg_html}
+                    <form method="post" class="ship-form">
+                        <input name="name" placeholder="Full name" required>
+                        <input name="address" placeholder="Address (street, city, ZIP)" required>
+                        <input name="phone" placeholder="Phone" required>
+                        <button class="btn btn--accent btn--block" type="submit">Place order 🔒</button>
+                        <p class="product__meta" style="text-align:center">The order is stored encrypted.</p>
+                    </form>
+                </div>
+            </div>
+            <div class="panel reveal">
+                <div class="panel__head">🧾 Summary</div>
+                <div class="panel__body">
+                    <ul class="order-list">{summary}</ul>
+                    <div class="cart-foot" style="margin-top:1.2rem">
+                        <span class="product__meta">{count} items</span>
+                        <div class="grand">Total: <b>{total:.2f} €</b></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+    return page("Checkout", inner)
+
+
+@app.route("/orders")
+def orders_view():
+    require_login()
+    conn = sqlite3.connect(VAULT_DB)
+    rows = conn.execute(
+        "SELECT data_enc, created_at FROM orders WHERE user_id=? ORDER BY id DESC",
+        (session["user_id"],)
+    ).fetchall()
+    conn.close()
+
+    ok = request.args.get("ok")
+    msg = ('<div class="notice" style="border-color:rgba(94,197,182,.5);color:var(--teal)">'
+           '✓ Your order has been placed!</div>') if ok else ""
+
+    cards = ""
+    for data_enc, created_at in rows:
+        try:
+            o = decrypt_order(data_enc)   # decrypt for display
+        except Exception:
+            continue
+        lines = "".join(
+            f'<li>{html.escape(i["name"])} × {i["qty"]} — {i["line"]:.2f} €</li>'
+            for i in o.get("items", [])
+        )
+        sh = o.get("shipping", {})
+        cards += f"""
+            <div class="panel reveal" style="margin-bottom:1.2rem">
+                <div class="panel__head">🧾 {created_at} · Total {o.get('total', 0):.2f} €</div>
+                <div class="panel__body">
+                    <ul class="order-list">{lines}</ul>
+                    <div class="product__meta" style="margin-top:.8rem">
+                        Shipping: {html.escape(sh.get('name', ''))} · {html.escape(sh.get('address', ''))} · {html.escape(sh.get('phone', ''))}
+                    </div>
+                </div>
+            </div>"""
+    body = cards or '<div class="empty">You have no orders yet.</div>'
+
+    inner = f"""
+    <div class="wrap wrap--narrow">
+        <div class="topbar">
+            <div>
+                <div class="eyebrow">History · Orders</div>
+                <h1>My orders</h1>
+            </div>
+            <a href="/user" class="btn btn--ghost">Back to products</a>
+        </div>
+        {msg}
+        {body}
+    </div>
+    """
+    return page("Orders", inner)
 
 
 @app.route("/logout")
 def logout():
-    # Πετάει το "βραχιολάκι" -> ξανα-κλειδώνει τις κρυφές σελίδες.
+    # Throws away the "wristband" -> re-locks the hidden pages.
     session.clear()
     return redirect(url_for("calculator"))
 

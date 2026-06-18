@@ -1,15 +1,18 @@
-# Προσωρινά αρχεία της Python (δεν χρειάζεται να μπουν στο Git)
+# Temporary Python files (no need to put them in Git)
 __pycache__/
 *.pyc
 
-# ΜΥΣΤΙΚΑ - να ΜΗΝ ανέβουν ποτέ στο GitHub!
-# (Τα σχόλια ΠΡΕΠΕΙ να είναι σε δική τους γραμμή — αλλιώς ο κανόνας δεν δουλεύει.)
+# SECRETS - must NEVER be uploaded to GitHub!
+# (Comments MUST be on their own line - otherwise the rule doesn't work.)
 
-# secret.key = το κλειδί που υπογράφει/κρυπτογραφεί τα sessions
+# secret.key = the key that signs/encrypts the sessions
 secret.key
 
-# *.db = οι βάσεις δεδομένων (μυστικοί αριθμοί + κωδικοί)
+# order.key = the key that encrypts the orders (Fernet)
+order.key
+
+# *.db = the databases (secret numbers + codes)
 *.db
 
-# Εικόνες προϊόντων που ανεβάζουν οι managers (περιεχόμενο χρηστών)
+# Product images uploaded by managers (user content)
 static/uploads/

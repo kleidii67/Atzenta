@@ -1,22 +1,22 @@
 """
-Φτιάχνει τις βάσεις δεδομένων για το calculator + κρυφή περιοχή:
+Creates the databases for the calculator + hidden area:
 
-1) combos.db  -> 100 ΜΟΝΑΔΙΚΟΙ "μυστικοί" αριθμοί.
-                 Αποθηκεύονται ως hash (όχι σκέτοι), ώστε να μη φαίνονται
-                 αν κάποιος ανοίξει τη βάση.
-                 ΕΝΑΣ αριθμός "ανοίγει την πόρτα" (πάει στη σελίδα κωδικού).
-                 Οι υπόλοιποι είναι δολώματα (σε γυρίζουν πίσω).
+1) combos.db  -> 100 UNIQUE "secret" numbers.
+                 Stored as hashes (not plain), so they aren't visible
+                 if someone opens the database.
+                 ONE number "opens the door" (goes to the code page).
+                 The rest are decoys (they send you back).
 
-2) vault.db   -> Οι ΧΡΗΣΤΕΣ (users) και τα ΠΡΟΪΟΝΤΑ (products).
-                 - users:    κάθε χρήστης έχει κωδικό (ως hash με salt) + ρόλο
+2) vault.db   -> The USERS and the PRODUCTS.
+                 - users:    each user has a code (as a salted hash) + a role
                              (admin / manager / simple).
-                 - products: ό,τι ανεβάζουν οι managers (όνομα, τιμή, εικόνα...).
-                 Στην αρχή υπάρχει ΕΝΑΣ admin.
+                 - products: whatever the managers upload (name, price, image...).
+                 At the start there is ONE admin.
 
-Φτιάχνει επίσης τον φάκελο static/uploads/ για τις εικόνες των προϊόντων.
+It also creates the static/uploads/ folder for product images.
 
-Τρέξε το ΜΙΑ φορά:  python setup_databases.py
-ΠΡΟΣΟΧΗ: ξανατρέχοντάς το, σβήνει ό,τι υπάρχει και ξεκινά από την αρχή!
+Run it ONCE:  python setup_databases.py
+WARNING: running it again deletes everything and starts from scratch!
 """
 
 import sqlite3
@@ -26,27 +26,27 @@ import hashlib
 from datetime import datetime
 from werkzeug.security import generate_password_hash
 
-# --- Ρυθμίσεις (μπορείς να τις αλλάξεις) ---
+# --- Settings (you can change these) ---
 HERE = os.path.dirname(os.path.abspath(__file__))
-NUMBERS_DB = os.path.join(HERE, "combos.db")     # οι μυστικοί αριθμοί
-VAULT_DB = os.path.join(HERE, "vault.db")        # χρήστες + προϊόντα
-UPLOAD_DIR = os.path.join(HERE, "static", "uploads")  # εικόνες προϊόντων
+NUMBERS_DB = os.path.join(HERE, "combos.db")     # the secret numbers
+VAULT_DB = os.path.join(HERE, "vault.db")        # users + products
+UPLOAD_DIR = os.path.join(HERE, "static", "uploads")  # product images
 
-HOW_MANY = 100                       # πόσους μυστικούς αριθμούς να φτιάξει
-ADMIN_PASSWORD = "mysecret123"       # <-- ΑΛΛΑΞΕ τον κωδικό του admin εδώ
-ADMIN_NAME = "Αφεντικό"              # <-- το όνομα/ετικέτα του admin
+HOW_MANY = 100                       # how many secret numbers to create
+ADMIN_PASSWORD = "mysecret123"       # <-- CHANGE the admin code here
+ADMIN_NAME = "Boss"                  # <-- the admin's name/label
 
 
 def sha256(text):
-    """Μετατρέπει ένα κείμενο σε hash SHA-256 (μονόδρομο - δεν ξεκλειδώνει)."""
+    """Turns text into a SHA-256 hash (one-way - it can't be reversed)."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def make_numbers_db():
-    """Φτιάχνει τη βάση με τους 100 μοναδικούς μυστικούς αριθμούς."""
-    # random.sample -> εγγυάται ΜΟΝΑΔΙΚΟΥΣ αριθμούς (καμία επανάληψη)
-    numbers = random.sample(range(100000, 1000000), HOW_MANY)  # 6ψήφιοι
-    door_number = numbers[0]   # ΜΟΝΟ αυτός ανοίγει την πόρτα· οι υπόλοιποι δολώματα
+    """Creates the database with the 100 unique secret numbers."""
+    # random.sample -> guarantees UNIQUE numbers (no repeats)
+    numbers = random.sample(range(100000, 1000000), HOW_MANY)  # 6-digit
+    door_number = numbers[0]   # ONLY this one opens the door; the rest are decoys
 
     conn = sqlite3.connect(NUMBERS_DB)
     conn.execute("DROP TABLE IF EXISTS secret_numbers")
@@ -68,10 +68,10 @@ def make_numbers_db():
 
 
 def make_vault_db():
-    """Φτιάχνει τις βάσεις των χρηστών και των προϊόντων, με έναν admin."""
+    """Creates the users and products databases, with one admin."""
     conn = sqlite3.connect(VAULT_DB)
 
-    # --- Πίνακας χρηστών (users) ---
+    # --- Users table ---
     conn.execute("DROP TABLE IF EXISTS users")
     conn.execute("""
         CREATE TABLE users (
@@ -83,7 +83,7 @@ def make_vault_db():
         )
     """)
 
-    # --- Πίνακας προϊόντων (products) ---
+    # --- Products table ---
     conn.execute("DROP TABLE IF EXISTS products")
     conn.execute("""
         CREATE TABLE products (
@@ -97,7 +97,19 @@ def make_vault_db():
         )
     """)
 
-    # --- Ο πρώτος (και μοναδικός) admin ---
+    # --- Orders table ---
+    # The content (data_enc) is stored ENCRYPTED (Fernet).
+    conn.execute("DROP TABLE IF EXISTS orders")
+    conn.execute("""
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            data_enc TEXT,
+            created_at TEXT
+        )
+    """)
+
+    # --- The first (and only) admin ---
     conn.execute(
         "INSERT INTO users (name, code_hash, role, created_at) VALUES (?, ?, ?, ?)",
         (ADMIN_NAME, generate_password_hash(ADMIN_PASSWORD), "admin",
@@ -109,7 +121,7 @@ def make_vault_db():
 
 
 def make_upload_dir():
-    """Φτιάχνει τον φάκελο static/uploads/ (αν δεν υπάρχει) για τις εικόνες."""
+    """Creates the static/uploads/ folder (if missing) for the images."""
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -118,13 +130,13 @@ if __name__ == "__main__":
     make_vault_db()
     make_upload_dir()
 
-    print("Έτοιμα! ✅")
-    print(f"- {NUMBERS_DB}  ({HOW_MANY} μυστικοί αριθμοί ως hash)")
-    print(f"- {VAULT_DB}  (χρήστες + προϊόντα)")
-    print(f"- {UPLOAD_DIR}  (φάκελος για εικόνες προϊόντων)")
+    print("Done! ✅")
+    print(f"- {NUMBERS_DB}  ({HOW_MANY} secret numbers as hashes)")
+    print(f"- {VAULT_DB}  (users + products)")
+    print(f"- {UPLOAD_DIR}  (folder for product images)")
     print()
-    print(f"🔑 Ο αριθμός που ΑΝΟΙΓΕΙ ΤΗΝ ΠΟΡΤΑ (γράψ' τον + πάτα «−»): {door_number}")
-    print(f"   Μετά, ο κωδικός του ADMIN είναι: {ADMIN_PASSWORD}")
+    print(f"\U0001F511 The number that OPENS THE DOOR (type it + press the minus key): {door_number}")
+    print(f"   Then, the ADMIN code is: {ADMIN_PASSWORD}")
     print()
-    print("🪤 Οι υπόλοιποι (δολώματα) σε πετάνε πίσω στην αρχική:")
+    print("\U0001FAA4 The rest (decoys) send you back to the home page:")
     print([n for n in secret_numbers if n != door_number])

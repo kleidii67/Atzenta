@@ -1,34 +1,43 @@
 # 🧮 Calculator (Flask)
 
-Μια αριθμομηχανή φτιαγμένη με **Flask** + **SQLite**, ως project εκμάθησης Python.
+A calculator built with **Flask** + **SQLite**, as a Python learning project.
 
-Ο κώδικας βρίσκεται στον φάκελο [`calculatorphone/`](calculatorphone/).
+The code lives in the [`calculatorphone/`](calculatorphone/) folder.
 
-## ▶️ Πώς τρέχει
+## ▶️ How to run
 
 ```bash
-# 1) Εγκατάσταση Flask (μία φορά)
-pip install flask
+# 1) Install the dependencies (once)
+pip install flask cryptography
 
-# 2) Στήσιμο των βάσεων δεδομένων (μία φορά)
+# 2) Set up the databases (once)
 cd calculatorphone
 python setup_databases.py
 
-# 3) Εκκίνηση
+# 3) Start it
 python calculatorflsk.py
 ```
 
-Άνοιξε τον browser στο **http://127.0.0.1:5000**
+Open your browser at **http://127.0.0.1:5000**
 
-## 🔐 Ασφάλεια
+## ✨ Features
 
-Τα μυστικά δεδομένα **δεν** ανεβαίνουν ποτέ στο GitHub (τα κρύβει το `.gitignore`):
+- A working calculator (the front page)
+- Three roles: **admin** (manages users/codes), **manager** (uploads products), **simple** (browses & buys)
+- A small shop: products with images, a shopping cart, and a checkout
+- Orders are saved **encrypted** (Fernet)
+- An admin dashboard with stats + product search
 
-- `secret.key` — το κλειδί που υπογράφει τα sessions
-- `*.db` — οι βάσεις δεδομένων
-- `static/uploads/` — αρχεία που ανεβάζουν οι χρήστες
+## 🔐 Security
 
-> Οι κωδικοί αποθηκεύονται μόνο ως salted hash και ποτέ σε απλό κείμενο.
+Secret data is **never** uploaded to GitHub (`.gitignore` hides it):
+
+- `secret.key` — the key that signs the sessions
+- `order.key` — the key that encrypts the orders
+- `*.db` — the databases
+- `static/uploads/` — files uploaded by users
+
+> Codes are stored only as salted hashes, never as plain text.
 
 ---
-*Φτιάχτηκε με 💛 ως μέρος ενός μαθήματος Python.*
+*Made with 💛 as part of a Python course.*
