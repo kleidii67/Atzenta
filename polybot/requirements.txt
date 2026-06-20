@@ -1,0 +1,9 @@
+# Core runtime
+httpx>=0.27          # Gamma REST discovery
+websockets>=12.0     # CLOB real-time order book stream
+
+# Live trading (only needed when LIVE_TRADING=true)
+py-clob-client>=0.17 # official Polymarket CLOB SDK (signs/posts orders)
+
+# Convenience (optional)
+python-dotenv>=1.0   # load credentials from a local .env file
